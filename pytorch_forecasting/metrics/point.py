@@ -1,6 +1,5 @@
 """Point metrics for forecasting a single point per time step."""
-
-from typing import Dict, List
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import scipy.stats
 import torch
@@ -8,7 +7,7 @@ import torch.nn.functional as F
 from torch.nn.utils import rnn
 
 from pytorch_forecasting.metrics.base_metrics import MultiHorizonMetric
-from pytorch_forecasting.utils import unpack_sequence
+from pytorch_forecasting.utils import create_mask, unpack_sequence, unsqueeze_like
 
 
 class PoissonLoss(MultiHorizonMetric):
@@ -193,7 +192,7 @@ class MASE(MultiHorizonMetric):
 
         # determine lengths for encoder
         if encoder_lengths is None:
-            encoder_target, encoder_lengths = unpack_sequence(encoder_target)
+            encoder_target, encoder_lengths = unpack_sequence(target)
         else:
             assert isinstance(encoder_target, torch.Tensor)
         assert not target.requires_grad

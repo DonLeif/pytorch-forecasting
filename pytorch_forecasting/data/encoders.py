@@ -10,7 +10,14 @@ import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
 import torch
 from torch.distributions import constraints
-from torch.distributions.transforms import ExpTransform, PowerTransform, SigmoidTransform, Transform, _clipped_sigmoid
+from torch.distributions.transforms import (
+    ExpTransform,
+    PowerTransform,
+    SigmoidTransform,
+    Transform,
+    _clipped_sigmoid,
+    identity_transform,
+)
 import torch.nn.functional as F
 from torch.nn.utils import rnn
 
@@ -54,7 +61,6 @@ class SoftplusTransform(Transform):
     Transform via the mapping :math:`\text{Softplus}(x) = \log(1 + \exp(x))`.
     The implementation reverts to the linear function when :math:`x > 20`.
     """
-
     domain = constraints.real
     codomain = constraints.positive
     bijective = True
@@ -87,7 +93,6 @@ class MinusOneTransform(Transform):
     r"""
     Transform x -> x - 1.
     """
-
     domain = constraints.real
     codomain = constraints.real
     sign: int = 1
@@ -107,7 +112,6 @@ class ReLuTransform(Transform):
     r"""
     Transform x -> max(0, x).
     """
-
     domain = constraints.real
     codomain = constraints.nonnegative
     sign: int = 1
@@ -360,7 +364,7 @@ class NaNLabelEncoder(InitialParameterRepresenterMixIn, BaseEstimator, Transform
         decoded = self.classes_vector_[y]
         return decoded
 
-    def __call__(self, data: Dict[str, torch.Tensor]) -> torch.Tensor:
+    def __call__(self, data: (Dict[str, torch.Tensor])) -> torch.Tensor:
         """
         Extract prediction from network output. Does not map back to input
         categories as this would require a numpy tensor without grad-abilities.
@@ -410,7 +414,7 @@ class TorchNormalizer(InitialParameterRepresenterMixIn, BaseEstimator, Transform
 
                 * None (default): No transformation of values
                 * log: Estimate in log-space leading to a multiplicative model
-                * log1p: Estimate in log-space but add 1 to values before transforming for stability
+                * logp1: Estimate in log-space but add 1 to values before transforming for stability
                   (e.g. if many small values <<1 are present).
                   Note, that inverse transform is still only `torch.exp()` and not `torch.expm1()`.
                 * logit: Apply logit transformation on values that are between 0 and 1
@@ -424,7 +428,7 @@ class TorchNormalizer(InitialParameterRepresenterMixIn, BaseEstimator, Transform
                   can be defined to provide a torch distribution transform for inverse transformations.
         """
         self.method = method
-        assert method in ["standard", "robust", "identity"], f"method has invalid value {method}"
+        assert method in ["standard", "robust", "identity","pct"], f"method has invalid value {method}"
         self.center = center
         self.transformation = transformation
         self.method_kwargs = method_kwargs
@@ -508,6 +512,23 @@ class TorchNormalizer(InitialParameterRepresenterMixIn, BaseEstimator, Transform
                 q_75 = np.percentile(y_scale, self.method_kwargs.get("upper", 0.75) * 100)
                 q_25 = np.percentile(y_scale, self.method_kwargs.get("lower", 0.25) * 100)
             self.scale_ = (q_75 - q_25) / 2.0 + eps
+
+        elif self.method == 'pct':
+            # print(y_center)
+            if isinstance(y_center, torch.Tensor):
+                self.center_ = self.scale_ = y_center[..., -1]
+                if self.center_ == 0:
+                    self.center_,_ = self.scale_,_ = y_center.max(dim=-1)
+                if self.center_ == 0:
+                    self.center_ = self.scale_ = 1
+            elif isinstance(y_center,pd.Series):
+                self.center_ = self.scale_ = y_center.iloc[-1]
+                if self.center_ == 0:
+                    self.center_ = self.scale_ = y_center.max()
+                if self.center_ == 0:
+                    self.center_ = self.scale_ = 1
+
+
         if not self.center and self.method != "identity":
             self.scale_ = self.center_
             if isinstance(y_center, torch.Tensor):
@@ -515,12 +536,15 @@ class TorchNormalizer(InitialParameterRepresenterMixIn, BaseEstimator, Transform
             else:
                 self.center_ = np.zeros_like(self.center_)
 
-        if (np.asarray(self.scale_) < 1e-7).any():
-            warnings.warn(
-                "scale is below 1e-7 - consider not centering "
-                "the data or using data with higher variance for numerical stability",
-                UserWarning,
-            )
+        try:
+            if (np.asarray(self.scale_) < 1e-7).any():
+                warnings.warn(
+                    "scale is below 1e-7 - consider not centering "
+                    "the data or using data with higher variance for numerical stability",
+                    UserWarning,
+                )
+        except:
+            pass
 
     def transform(
         self,
@@ -551,12 +575,15 @@ class TorchNormalizer(InitialParameterRepresenterMixIn, BaseEstimator, Transform
             scale = scale.view(*scale.size(), *(1,) * (y.ndim - scale.ndim))
 
         # transform
-        dtype = y.dtype
-        y = (y - center) / scale
-        try:
-            y = y.astype(dtype)
-        except AttributeError:  # torch.Tensor has `.type()` instead of `.astype()`
-            y = y.type(dtype)
+        if self.method!='pct':
+            dtype = y.dtype
+            y = (y - center) / scale
+            try:
+                y = y.astype(dtype)
+            except AttributeError:  # torch.Tensor has `.type()` instead of `.astype()`
+                y = y.type(dtype)
+        else:
+            y = y / scale -1
 
         # return with center and scale or without
         if return_norm:
@@ -599,7 +626,10 @@ class TorchNormalizer(InitialParameterRepresenterMixIn, BaseEstimator, Transform
             norm = norm.unsqueeze(-1)
 
         # transform
-        y = data["prediction"] * norm[:, 1, None] + norm[:, 0, None]
+        if self.method!='pct':
+            y = data["prediction"] * norm[:, 1, None] + norm[:, 0, None]
+        else:
+            y = (data["prediction"]+1) * norm[:, 1, None]
 
         y = self.inverse_preprocess(y)
 
@@ -642,7 +672,7 @@ class EncoderNormalizer(TorchNormalizer):
 
                 * None (default): No transformation of values
                 * log: Estimate in log-space leading to a multiplicative model
-                * log1p: Estimate in log-space but add 1 to values before transforming for stability
+                * logp1: Estimate in log-space but add 1 to values before transforming for stability
                     (e.g. if many small values <<1 are present).
                     Note, that inverse transform is still only `torch.exp()` and not `torch.expm1()`.
                 * logit: Apply logit transformation on values that are between 0 and 1
@@ -713,7 +743,69 @@ class EncoderNormalizer(TorchNormalizer):
             return x[s]
         else:
             return x[..., s]
+        
 
+class EncoderPctNormalizer(TorchNormalizer):
+    """
+    Normalizer that scales each sequence based on its last value.
+
+    If used, this transformer will be fitted on each encoder sequence separately.
+    This normalizer can be particularly useful as target normalizer.
+    """
+
+    def fit(self, y: Union[pd.Series, np.ndarray, torch.Tensor]):
+        """
+        Fit transformer, i.e. determine last value of each sequence.
+
+        Args:
+            y (Union[pd.Series, np.ndarray, torch.Tensor]): input data
+
+        Returns:
+            EncoderPctNormalizer: self
+        """
+        y = self.preprocess(y)
+        if isinstance(y, pd.Series):
+            self.last_value = y.iloc[-1]
+        elif isinstance(y, pd.DataFrame):
+            self.last_value = y.iloc[:, -1]
+        else:  # np.ndarray or torch.Tensor
+            self.last_value = y[..., -1]
+
+        self.center_ = 1/self.last_value
+        self.scale_ = 1/self.last_value
+
+        print (y.shape)
+
+        return self
+
+    def transform(
+        self,
+        y: Union[pd.Series, np.ndarray, torch.Tensor],
+        return_norm: bool = False
+    ) -> Union[Tuple[Union[np.ndarray, torch.Tensor], np.ndarray], Union[np.ndarray, torch.Tensor]]:
+        """
+        Rescale data based on the last value of each sequence.
+
+        Args:
+            y (Union[pd.Series, np.ndarray, torch.Tensor]): input data
+            return_norm (bool, optional): [description]. Defaults to False.
+
+        Returns:
+            Union[Tuple[Union[np.ndarray, torch.Tensor], np.ndarray], Union[np.ndarray, torch.Tensor]]: rescaled
+                data with type depending on input type. returns second element if ``return_norm=True``
+        """
+        y = self.preprocess(y)
+        if isinstance(y, pd.Series):
+            y = y / self.last_value
+        elif isinstance(y, pd.DataFrame):
+            y = y.divide(self.last_value, axis='columns')
+        else:  # np.ndarray or torch.Tensor
+            y = y / self.last_value[..., None]
+
+        if return_norm:
+            return y, self.last_value
+        else:
+            return y
 
 class GroupNormalizer(TorchNormalizer):
     """
@@ -749,7 +841,7 @@ class GroupNormalizer(TorchNormalizer):
 
                 * None (default): No transformation of values
                 * log: Estimate in log-space leading to a multiplicative model
-                * log1p: Estimate in log-space but add 1 to values before transforming for stability
+                * logp1: Estimate in log-space but add 1 to values before transforming for stability
                     (e.g. if many small values <<1 are present).
                     Note, that inverse transform is still only `torch.exp()` and not `torch.expm1()`.
                 * logit: Apply logit transformation on values that are between 0 and 1
@@ -1185,23 +1277,17 @@ class MultiNormalizer(TorchNormalizer):
                         results = []
                         for idx, norm in enumerate(self.normalizers):
                             new_args = [
-                                (
-                                    arg[idx]
-                                    if isinstance(arg, (list, tuple))
-                                    and not isinstance(arg, rnn.PackedSequence)
-                                    and len(arg) == n
-                                    else arg
-                                )
+                                arg[idx]
+                                if isinstance(arg, (list, tuple))
+                                and not isinstance(arg, rnn.PackedSequence)
+                                and len(arg) == n
+                                else arg
                                 for arg in args
                             ]
                             new_kwargs = {
-                                key: (
-                                    val[idx]
-                                    if isinstance(val, list)
-                                    and not isinstance(val, rnn.PackedSequence)
-                                    and len(val) == n
-                                    else val
-                                )
+                                key: val[idx]
+                                if isinstance(val, list) and not isinstance(val, rnn.PackedSequence) and len(val) == n
+                                else val
                                 for key, val in kwargs.items()
                             }
                             results.append(getattr(norm, name)(*new_args, **new_kwargs))

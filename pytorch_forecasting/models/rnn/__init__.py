@@ -1,7 +1,6 @@
 """
 Simple recurrent model - either with LSTM or GRU cells.
 """
-
 from copy import copy
 from typing import Dict, List, Tuple, Union
 

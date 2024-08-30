@@ -202,9 +202,6 @@ class TimeSeriesDataSet(Dataset):
         scalers: Dict[str, Union[StandardScaler, RobustScaler, TorchNormalizer, EncoderNormalizer]] = {},
         randomize_length: Union[None, Tuple[float, float], bool] = False,
         predict_mode: bool = False,
-        scale_target:bool = False,
-        cum_mean:bool = False,
-        cum_sum:bool = False,
     ):
         """
         Timeseries dataset holding data for models.
@@ -220,6 +217,14 @@ class TimeSeriesDataSet(Dataset):
         sampled into batches for training, is determined by the DataLoader. The class provides the
         :py:meth:`~TimeSeriesDataSet.to_dataloader` method to convert the dataset into a dataloader.
 
+        Large datasets:
+
+            Currently the class is limited to in-memory operations (that can be sped up by an
+            existing installation of `numba <https://pypi.org/project/numba/>`_). If you have extremely large data,
+            however, you can pass prefitted encoders and and scalers to it and a subset of sequences to the class to
+            construct a valid dataset (plus, likely the EncoderNormalizer should be used to normalize targets).
+            when fitting a network, you would then to create a custom DataLoader that rotates through the datasets.
+            There is currently no in-built methods to do this.
 
         Args:
             data (pd.DataFrame): dataframe with sequence data - each row can be identified with
@@ -323,9 +328,6 @@ class TimeSeriesDataSet(Dataset):
                 prediction samples and everthing previous up to ``max_encoder_length`` samples as encoder samples.
         """
         super().__init__()
-        self.scale_target = scale_target
-        self.cum_mean = cum_mean
-        self.cum_sum = cum_sum
         self.max_encoder_length = max_encoder_length
         assert isinstance(self.max_encoder_length, int), "max encoder length must be integer"
         if min_encoder_length is None:
@@ -377,14 +379,6 @@ class TimeSeriesDataSet(Dataset):
         self.add_target_scales = add_target_scales
         self.variable_groups = {} if len(variable_groups) == 0 else variable_groups
         self.lags = {} if len(lags) == 0 else lags
-
-        if self.cum_mean:
-            T = 300
-            tril = torch.tril(torch.ones((T,T)))
-            weights = torch.zeros((T,T))
-            weights = torch.masked_fill(weights, tril==0,float('-inf'))
-            weights = torch.nn.functional.softmax(weights,dim=-1)
-            self.cumsum_matrix = weights
 
         # add_encoder_length
         if isinstance(add_encoder_length, str):
@@ -725,7 +719,10 @@ class TimeSeriesDataSet(Dataset):
                         )
             else:
                 if name not in self.categorical_encoders:
-                    self.categorical_encoders[name] = NaNLabelEncoder().fit(data[name])
+                    try:
+                        self.categorical_encoders[name] = NaNLabelEncoder().fit(data[name])
+                    except:
+                        raise ValueError(f"could not encode {name} - try adding it to variable groups")
                 elif self.categorical_encoders[name] is not None and name not in self.target_names:
                     try:
                         check_is_fitted(self.categorical_encoders[name])
@@ -1661,7 +1658,6 @@ class TimeSeriesDataSet(Dataset):
             target = target[0][encoder_length:]
             target_scale = target_scale[0]
 
-
         return (
             dict(
                 x_cat=data_cat,
@@ -1676,7 +1672,8 @@ class TimeSeriesDataSet(Dataset):
             (target, weight),
         )
 
-    def _collate_fn(self,
+    @staticmethod
+    def _collate_fn(
         batches: List[Tuple[Dict[str, torch.Tensor], torch.Tensor]]
     ) -> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
         """
@@ -1752,20 +1749,6 @@ class TimeSeriesDataSet(Dataset):
             weight = rnn.pad_sequence([batch[1][1] for batch in batches], batch_first=True)
         else:
             weight = None
-
-        if self.cum_mean:
-            target = self.cumsum_matrix[:target.shape[1],:target.shape[1]].to(target.device) @ target.unsqueeze(-1)
-            target = target.squeeze(-1)
-
-        if self.cum_sum:
-            target = torch.cumsum(target, dim=-1)
-
-        if self.scale_target:
-            if not isinstance(target_scale, list):
-                target = (target - target_scale[:,0].unsqueeze(-1) ) /target_scale[:,1].unsqueeze(-1)
-            else:
-                target = [(target_i - target_scale_i[:,0].unsqueeze(-1) ) /target_scale_i[:,1].unsqueeze(-1)
-                for target_i, target_scale_i in zip(target, target_scale)]
 
         return (
             dict(

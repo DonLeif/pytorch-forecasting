@@ -1,7 +1,6 @@
 """
 N-Beats model for timeseries forecasting without covariates.
 """
-
 from typing import Dict, List
 
 import matplotlib.pyplot as plt

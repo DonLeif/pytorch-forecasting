@@ -1,8 +1,8 @@
 """
 Timeseries models share a number of common characteristics. This module implements these in a common base class.
 """
-
 from collections import namedtuple
+import copy
 from copy import deepcopy
 import inspect
 import logging
@@ -14,10 +14,10 @@ import lightning.pytorch as pl
 from lightning.pytorch import LightningModule, Trainer
 from lightning.pytorch.callbacks import BasePredictionWriter, LearningRateFinder
 from lightning.pytorch.trainer.states import RunningStage
-from lightning.pytorch.utilities.parsing import get_init_args
+from lightning.pytorch.utilities.parsing import AttributeDict, get_init_args
 import matplotlib.pyplot as plt
 import numpy as np
-from numpy import iterable
+from numpy.lib.function_base import iterable
 import pandas as pd
 import pytorch_optimizer
 from pytorch_optimizer import Ranger21
@@ -77,20 +77,16 @@ def _torch_cat_na(x: List[torch.Tensor]) -> torch.Tensor:
         max_first_len = max(first_lens)
         if max_first_len > min(first_lens):
             x = [
-                (
-                    xi
-                    if xi.shape[1] == max_first_len
-                    else torch.cat(
-                        [
-                            xi,
-                            torch.full(
-                                (xi.shape[0], max_first_len - xi.shape[1], *xi.shape[2:]),
-                                float("nan"),
-                                device=xi.device,
-                            ),
-                        ],
-                        dim=1,
-                    )
+                xi
+                if xi.shape[1] == max_first_len
+                else torch.cat(
+                    [
+                        xi,
+                        torch.full(
+                            (xi.shape[0], max_first_len - xi.shape[1], *xi.shape[2:]), float("nan"), device=xi.device
+                        ),
+                    ],
+                    dim=1,
                 )
                 for xi in x
             ]
@@ -208,7 +204,7 @@ class PredictCallback(BasePredictionWriter):
     def _reset_data(self, result: bool = True):
         # reset data objects to save results into
         self._output = []
-        self._decode_lengths = []
+        self._decode_lenghts = []
         self._x_list = []
         self._index = []
         self._y = []
@@ -271,8 +267,8 @@ class PredictCallback(BasePredictionWriter):
             self._index.append(trainer.predict_dataloaders.dataset.x_to_index(x))
             out["index"] = self._index[-1]
         if self.return_decoder_lengths:
-            self._decode_lengths.append(lengths)
-            out["decoder_lengths"] = self._decode_lengths[-1]
+            self._decode_lenghts.append(lengths)
+            out["decoder_lengths"] = self._decode_lenghts[-1]
         if self.return_y:
             self._y.append(batch[1])
             out["y"] = self._y[-1]
@@ -316,7 +312,7 @@ class PredictCallback(BasePredictionWriter):
             if self.return_index:
                 output["index"] = pd.concat(self._index, axis=0, ignore_index=True)
             if self.return_decoder_lengths:
-                output["decoder_lengths"] = torch.cat(self._decode_lengths, dim=0)
+                output["decoder_lengths"] = torch.cat(self._decode_lenghts, dim=0)
             if self.return_y:
                 y = concat_sequences([yi[0] for yi in self._y])
                 if self._y[-1][1] is None:
@@ -397,7 +393,6 @@ class BaseModel(InitialParameterRepresenterMixIn, LightningModule, TupleOutputMi
 
     def __init__(
         self,
-        dataset_parameters: Dict[str, Any] = None,
         log_interval: Union[int, float] = -1,
         log_val_interval: Union[int, float] = None,
         learning_rate: Union[float, List[float]] = 1e-3,
@@ -472,8 +467,6 @@ class BaseModel(InitialParameterRepresenterMixIn, LightningModule, TupleOutputMi
             self.output_transformer = output_transformer
         if not hasattr(self, "optimizer"):  # callables are removed from hyperparameters, so better to save them
             self.optimizer = self.hparams.optimizer
-        if not hasattr(self, "dataset_parameters"):
-            self.dataset_parameters = dataset_parameters
 
         # delete everything from hparams that cannot be serialized with yaml.dump
         # which is particularly important for tensorboard logging
@@ -1154,10 +1147,26 @@ class BaseModel(InitialParameterRepresenterMixIn, LightningModule, TupleOutputMi
             optimizer = torch.optim.Adam(
                 self.parameters(), lr=lr, weight_decay=self.hparams.weight_decay, **optimizer_params
             )
-        elif self.hparams.optimizer == "adamw":
-            optimizer = torch.optim.AdamW(
-                self.parameters(), lr=lr, weight_decay=self.hparams.weight_decay, **optimizer_params
-            )
+        elif self.hparams.optimizer == "adamw":   # from https://github.com/karpathy/nanoGPT/blob/master/model.py
+
+            param_dict = {pn: p for pn, p in self.named_parameters()}
+            param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+            decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+            nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+            optim_groups = [
+                {'params': decay_params, 'weight_decay': self.hparams.weight_decay},
+                {'params': nodecay_params, 'weight_decay': 0.0}
+            ]
+            num_decay_params = sum(p.numel() for p in decay_params)
+            num_nodecay_params = sum(p.numel() for p in nodecay_params)
+            print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
+            print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
+            fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+            use_fused = fused_available and self.device == 'cuda'
+            extra_args = dict(fused=True) if use_fused else dict()
+            optimizer_params.update(extra_args)
+            optimizer = torch.optim.AdamW(optim_groups, lr=lr, **optimizer_params)
+
         elif self.hparams.optimizer == "ranger":
             if any([isinstance(c, LearningRateFinder) for c in self.trainer.callbacks]):
                 # if finding learning rate, switch off warm up and cool down
@@ -1242,9 +1251,8 @@ class BaseModel(InitialParameterRepresenterMixIn, LightningModule, TupleOutputMi
         """
         if "output_transformer" not in kwargs:
             kwargs["output_transformer"] = dataset.target_normalizer
-        if "dataset_parameters" not in kwargs:
-            kwargs["dataset_parameters"] = dataset.get_parameters()
         net = cls(**kwargs)
+        net.dataset_parameters = dataset.get_parameters()
         if dataset.multi_target:
             assert isinstance(
                 net.loss, MultiLoss
@@ -1481,14 +1489,13 @@ class BaseModel(InitialParameterRepresenterMixIn, LightningModule, TupleOutputMi
             # set values
             data.set_overwrite_values(variable=variable, values=value, target=target)
             # predict
-            pred_kwargs = deepcopy(kwargs)
-            pred_kwargs.setdefault("mode", "prediction")
+            kwargs.setdefault("mode", "prediction")
 
             if idx == 0 and mode == "dataframe":  # need index for returning as dataframe
-                res = self.predict(data, return_index=True, **pred_kwargs)
+                res = self.predict(data, return_index=True, **kwargs)
                 results.append(res.output)
             else:
-                results.append(self.predict(data, **pred_kwargs))
+                results.append(self.predict(data, **kwargs))
             # increment progress
             progress_bar.update()
 

@@ -1,7 +1,6 @@
 """
 The temporal fusion transformer is a powerful predictive model for forecasting timeseries
 """
-
 from copy import copy
 from typing import Dict, List, Tuple, Union
 
@@ -12,7 +11,8 @@ from torch import nn
 from torchmetrics import Metric as LightningMetric
 
 from pytorch_forecasting.data import TimeSeriesDataSet
-from pytorch_forecasting.metrics import MAE, MAPE, RMSE, SMAPE, MultiHorizonMetric, QuantileLoss
+from pytorch_forecasting.data.encoders import NaNLabelEncoder
+from pytorch_forecasting.metrics import MAE, MAPE, MASE, RMSE, SMAPE, MultiHorizonMetric, MultiLoss, QuantileLoss
 from pytorch_forecasting.models.base_model import BaseModelWithCovariates
 from pytorch_forecasting.models.nn import LSTM, MultiEmbedding
 from pytorch_forecasting.models.temporal_fusion_transformer.sub_modules import (
@@ -59,8 +59,10 @@ class TemporalFusionTransformer(BaseModelWithCovariates):
         share_single_variable_networks: bool = False,
         causal_attention: bool = True,
         logging_metrics: nn.ModuleList = None,
+        rescale: bool = True,
         **kwargs,
     ):
+        
         """
         Temporal Fusion Transformer for forecasting timeseries - use its :py:meth:`~from_dataset` method if possible.
 
@@ -226,9 +228,9 @@ class TemporalFusionTransformer(BaseModelWithCovariates):
             dropout=self.hparams.dropout,
             context_size=self.hparams.hidden_size,
             prescalers=self.prescalers,
-            single_variable_grns=(
-                {} if not self.hparams.share_single_variable_networks else self.shared_single_variable_grns
-            ),
+            single_variable_grns={}
+            if not self.hparams.share_single_variable_networks
+            else self.shared_single_variable_grns,
         )
 
         self.decoder_variable_selection = VariableSelectionNetwork(
@@ -238,9 +240,9 @@ class TemporalFusionTransformer(BaseModelWithCovariates):
             dropout=self.hparams.dropout,
             context_size=self.hparams.hidden_size,
             prescalers=self.prescalers,
-            single_variable_grns=(
-                {} if not self.hparams.share_single_variable_networks else self.shared_single_variable_grns
-            ),
+            single_variable_grns={}
+            if not self.hparams.share_single_variable_networks
+            else self.shared_single_variable_grns,
         )
 
         # static encoders
@@ -501,8 +503,13 @@ class TemporalFusionTransformer(BaseModelWithCovariates):
         else:
             output = self.output_layer(output)
 
+        if self.hparams.rescale:
+            prediction = self.transform_output(output, target_scale=x["target_scale"])
+        else:
+            prediction = output
+                                               
         return self.to_network_output(
-            prediction=self.transform_output(output, target_scale=x["target_scale"]),
+            prediction=prediction,
             encoder_attention=attn_output_weights[..., :max_encoder_length],
             decoder_attention=attn_output_weights[..., max_encoder_length:],
             static_variables=static_variable_selection,
@@ -511,6 +518,13 @@ class TemporalFusionTransformer(BaseModelWithCovariates):
             decoder_lengths=decoder_lengths,
             encoder_lengths=encoder_lengths,
         )
+
+
+    def rescale_on(self):
+        self.hparams.rescale = True
+
+    def rescale_off(self):
+        self.hparams.rescale = False
 
     def on_fit_end(self):
         if self.log_interval > 0:

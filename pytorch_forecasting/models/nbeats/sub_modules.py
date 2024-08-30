@@ -1,7 +1,6 @@
 """
 Implementation of ``nn.Modules`` for N-Beats model.
 """
-
 from typing import Tuple
 
 import numpy as np

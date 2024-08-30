@@ -1,7 +1,6 @@
 """
 Baseline model.
 """
-
 from typing import Any, Dict
 
 import torch

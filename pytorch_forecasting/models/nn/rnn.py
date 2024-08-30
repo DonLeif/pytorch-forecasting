@@ -1,7 +1,6 @@
 """
 Implementations of flexible GRU and LSTM that can handle sequences of length 0.
 """
-
 from abc import ABC, abstractmethod
 from typing import Tuple, Type, Union
 
