@@ -282,7 +282,6 @@ class HNAM(BaseModelWithCovariates):
             }
         )
 
-        self.trend_ln = LayerNorm(cov_emb,bias=bias)
         self.causal_lns = nn.ModuleDict({feature:LayerNorm(cov_emb, bias=bias) for feature in self.hparams.causal})
         self.past_ln = LayerNorm(cov_emb,bias=bias)
         self.post_lns = nn.ModuleDict({feature:LayerNorm(cov_emb,bias=bias) for feature in self.hparams.causal})
