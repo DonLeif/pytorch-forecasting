@@ -60,7 +60,7 @@ class Smoothing_GRU(nn.Module):
     def __init__(self,cov_emb,dropout,enc_len, dec_len,factor=1,damped=True):
         super().__init__()
 
-        self.gru = nn.GRU(input_size=cov_emb,hidden_size=cov_emb*factor,dropout=dropout,num_layers=1,bias=True,batch_first=True,bidirectional=False)
+        self.gru = nn.GRU(input_size=cov_emb,hidden_size=cov_emb*factor,dropout=0,num_layers=1,bias=True,batch_first=True,bidirectional=False)
         self.param_projection = nn.Linear(cov_emb*factor,3 if damped else 2)
         # self.trend_proj = nn.Linear(1,cov_emb)
 
