@@ -392,7 +392,12 @@ class HNAM(BaseModelWithCovariates):
 
             cat_effect =  causal_decoder[c] * one_hot_cat                    # multiplication with one hot -> only one effect is left
             cat_effects[c] = cat_effect.sum(dim=-1).transpose(1,2)           # back to batch x time x output_size(quantiles)
-            cov_effects += cat_effects[c]          
+
+            #experimental
+            if c in self.hparams.one_hot_not_minus_one:
+                cat_effects[c] = cat_effects[c] - cat_effects[c].mean(dim=1,keepdim=True)
+
+            cov_effects += cat_effects[c]                
 
 
         reals_dec = [c for c in self.hparams.causal if c in reals_dec]
