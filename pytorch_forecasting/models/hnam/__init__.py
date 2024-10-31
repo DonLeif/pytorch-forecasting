@@ -52,6 +52,63 @@ class MLP(nn.Module):
         return x
     
 
+# class Smoothing_GRU(nn.Module):
+
+#     """A double exponential smoothing -esque layer that parameterizes smoothing parameters with a GRU"""
+
+
+#     def __init__(self,cov_emb,dropout,enc_len, dec_len,factor=1,damped=True):
+#         super().__init__()
+
+#         self.gru = nn.GRU(input_size=cov_emb,hidden_size=cov_emb*factor,dropout=0,num_layers=1,bias=True,batch_first=True,bidirectional=False)
+#         self.param_projection = nn.Linear(cov_emb*factor,3 if damped else 2)
+#         # self.trend_proj = nn.Linear(1,cov_emb)
+
+#         self.len_enc = enc_len
+#         self.len_dec = dec_len
+#         self.damped = damped
+
+#     def forward(self, x, level_past):
+#         b, t, s = x.size()
+#         assert level_past.dim() == 2, "level_past must be 2-dimensional (batch_size x len_enc)"
+
+#         enc_range = torch.arange(self.len_enc,device=x.device).flip(0)
+
+#         _,h = self.gru(x)
+#         x = h.permute(1,0,2)[:,-1,:]
+#         x = self.param_projection(x)
+#         x = torch.sigmoid(x)
+#         alpha = x[:,0].unsqueeze(1)
+#         beta = x[:,1].unsqueeze(1)
+#         phi = x[:,2].unsqueeze(1) if self.damped else None
+
+#         weights = (alpha * (1 - alpha) ** enc_range)
+#         weights = weights / weights.sum(1, keepdim=True)
+
+#         output_level = (weights.unsqueeze(1) @ level_past.unsqueeze(-1)).repeat(1,self.len_dec,1)
+
+#         # Trend calculation
+#         target_diff = level_past.diff(dim=1)
+        
+#         weights = (beta * (1 - beta) ** enc_range[1:])
+#         weights /= weights.sum(1, keepdim=True)
+#         output_trend = (weights.unsqueeze(1) @ target_diff.unsqueeze(-1)).repeat(1, self.len_dec, 1)
+
+#         # Damped trend calculation
+#         if self.damped:
+#             output_trend *= phi.unsqueeze(-1) ** torch.arange(self.len_dec,device=x.device).unsqueeze(0).unsqueeze(-1)
+
+#         # Cumulative sum to generate the trend over time
+#         output_trend = output_trend.cumsum(dim=1)
+        
+#         # Combine level and trend
+#         output_tensor = output_level + output_trend
+
+#         return output_tensor, (alpha,beta,phi)
+    
+
+
+
 class Smoothing_GRU(nn.Module):
 
     """A double exponential smoothing -esque layer that parameterizes smoothing parameters with a GRU"""
@@ -61,38 +118,37 @@ class Smoothing_GRU(nn.Module):
         super().__init__()
 
         self.gru = nn.GRU(input_size=cov_emb,hidden_size=cov_emb*factor,dropout=0,num_layers=1,bias=True,batch_first=True,bidirectional=False)
-        self.param_projection = nn.Linear(cov_emb*factor,3 if damped else 2)
-        # self.trend_proj = nn.Linear(1,cov_emb)
+        self.param_projection = nn.Linear(cov_emb*factor,2)
+        self.damp_proj = nn.Linear(cov_emb*factor,1)
+        self.level_proj = nn.Linear(1,cov_emb)
+
 
         self.len_enc = enc_len
         self.len_dec = dec_len
         self.damped = damped
 
+        
+
     def forward(self, x, level_past):
         b, t, s = x.size()
         assert level_past.dim() == 2, "level_past must be 2-dimensional (batch_size x len_enc)"
 
-        enc_range = torch.arange(self.len_enc,device=x.device).flip(0)
+        output,h = self.gru(x)
 
-        _,h = self.gru(x)
-        x = h.permute(1,0,2)[:,-1,:]
-        x = self.param_projection(x)
-        x = torch.sigmoid(x)
-        alpha = x[:,0].unsqueeze(1)
-        beta = x[:,1].unsqueeze(1)
-        phi = x[:,2].unsqueeze(1) if self.damped else None
+        parameters = self.param_projection(output)
 
-        weights = (alpha * (1 - alpha) ** enc_range)
-        weights = weights / weights.sum(1, keepdim=True)
+        alpha = parameters[:,:,0]
+        beta = parameters[:,1:,1]
+        phi = torch.sigmoid(self.damp_proj(h.permute(1,0,2)[:,-1,:]))
 
-        output_level = (weights.unsqueeze(1) @ level_past.unsqueeze(-1)).repeat(1,self.len_dec,1)
+        alpha = F.softmax(alpha,dim=1)
+        output_level = (alpha.unsqueeze(1) @ level_past.unsqueeze(-1)).repeat(1,self.len_dec,1)
 
         # Trend calculation
         target_diff = level_past.diff(dim=1)
         
-        weights = (beta * (1 - beta) ** enc_range[1:])
-        weights /= weights.sum(1, keepdim=True)
-        output_trend = (weights.unsqueeze(1) @ target_diff.unsqueeze(-1)).repeat(1, self.len_dec, 1)
+        beta = F.softmax(beta,dim=1)
+        output_trend = (beta.unsqueeze(1) @ target_diff.unsqueeze(-1)).repeat(1, self.len_dec, 1)
 
         # Damped trend calculation
         if self.damped:
@@ -103,9 +159,9 @@ class Smoothing_GRU(nn.Module):
         
         # Combine level and trend
         output_tensor = output_level + output_trend
-
-        return output_tensor, (alpha,beta,phi)
-
+        level_past = level_past.unsqueeze(-1)
+        level_proj = self.level_proj(output_tensor)
+        return output_tensor, level_proj, (alpha,beta,phi)
     
 class LayerNorm(nn.Module):
 
@@ -234,7 +290,7 @@ class HNAM(BaseModelWithCovariates):
         dropout: float = 0.1,
         factor: int = 2,
         bias: bool = False,
-        clean_past = True,
+        clean_past = False,
         base = [],
         causal = [],
         one_hot_not_minus_one = [],
@@ -359,6 +415,8 @@ class HNAM(BaseModelWithCovariates):
             limit_slice = all_slice
             cov_effects = max_decoder_length
 
+        level_past = self.dtf(x_normal,self.hparams.target,stack=True).sum(axis=2)[:,:max_encoder_length,0] 
+        level_pred,level_proj,smoothing_params = self.trend_block(past_key_values,level_past)
 
 
         # FINDING COVARIATE COEFFICIENTS
@@ -366,7 +424,7 @@ class HNAM(BaseModelWithCovariates):
         causal_decoder = {}
         for i,feature in enumerate(self.hparams.causal):
             # preparing queries for attention
-            causal_decoder[feature] = self.dtf(x_encoded,self.hparams.causal[:i+1]+self.hparams.base,stack=True).sum(axis=2)[:,causal_slice,:]
+            causal_decoder[feature] = self.dtf(x_encoded,self.hparams.causal[:i+1]+self.hparams.base,stack=True).sum(axis=2)[:,causal_slice,:]+level_proj
             causal_decoder[feature] = self.causal_lns[feature](causal_decoder[feature])
 
         # MULTI ATTENTION BLOCK
@@ -389,15 +447,16 @@ class HNAM(BaseModelWithCovariates):
             one_hot_cat = one_hot_cat.transpose(1,2)                         # unsqueeze is already done in one hot 
             one_hot_cat = one_hot_cat[:,:,:,int(c not in self.hparams.one_hot_not_minus_one):]  # sparse one hot if not excluded
 
-
             cat_effect =  causal_decoder[c] * one_hot_cat                    # multiplication with one hot -> only one effect is left
             cat_effects[c] = cat_effect.sum(dim=-1).transpose(1,2)           # back to batch x time x output_size(quantiles)
-
+        
             #experimental
             if c in self.hparams.one_hot_not_minus_one:
                 cat_effects[c] = cat_effects[c] - cat_effects[c].mean(dim=1,keepdim=True)
 
-            cov_effects += cat_effects[c]                
+            cov_effects += cat_effects[c]          
+
+
 
 
         reals_dec = [c for c in self.hparams.causal if c in reals_dec]
@@ -411,14 +470,7 @@ class HNAM(BaseModelWithCovariates):
         # somehow the additions dont add up for cleaning the past
         # something about transforming the output?
 
-        level_past = self.dtf(x_normal,self.hparams.target,stack=True).sum(axis=2)[:,:max_encoder_length,0]  # dim2
 
-        if clean_past:
-            level_past = level_past - cov_effects[:,enc_slice,(math.ceil(self.hparams.output_size/2)-1)]
-
-
-        level_pred, smoothing_params = self.trend_block(past_key_values,level_past)
-        level_past = level_past.unsqueeze(-1)
 
         output = level_pred + cov_effects[:,limit_slice,:]
 
@@ -471,7 +523,7 @@ class HNAM(BaseModelWithCovariates):
                 bias = False,
                 loss = RMSE(),
                 attention = True,
-                clean_past = True,
+                clean_past = False,
                 att_proj = 'cnn')
         
         kwargs = {**default_kwargs,**kwargs}
