@@ -107,8 +107,6 @@ class MLP(nn.Module):
 #         return output_tensor, (alpha,beta,phi)
     
 
-
-
 class Smoothing_GRU(nn.Module):
 
     """A double exponential smoothing -esque layer that parameterizes smoothing parameters with a GRU"""
@@ -128,7 +126,6 @@ class Smoothing_GRU(nn.Module):
         self.damped = damped
 
         
-
     def forward(self, x, level_past):
         b, t, s = x.size()
         assert level_past.dim() == 2, "level_past must be 2-dimensional (batch_size x len_enc)"
@@ -161,6 +158,78 @@ class Smoothing_GRU(nn.Module):
         output_tensor = output_level + output_trend
         level_past = level_past.unsqueeze(-1)
         level_proj = self.level_proj(output_tensor)
+        return output_tensor, level_proj, (alpha,beta,phi)
+    
+class TrendAttention(nn.Module):
+    def __init__(self,enc_len,dec_len,cov_emb:int = 32,bias:bool = False,n_head:int = 2,factor:int = 1,dropout:float = 0.3,att_proj='linear'):
+        super().__init__()
+
+        self.c_attn_q  = TemporalConvolutionalLayer(cov_emb, dropout=dropout)
+        self.c_attn_k = TemporalConvolutionalLayer(cov_emb, dropout=dropout)
+        self.c_attn_v = TemporalConvolutionalLayer(cov_emb, dropout=dropout)
+
+        self.c_proj = nn.Linear(cov_emb, cov_emb, bias=bias)
+        self.p_proj = nn.Linear(cov_emb, 3, bias=bias)
+        self.l_proj = nn.Linear(1, cov_emb, bias=bias)
+
+        self.attn_dropout = nn.Dropout(dropout)
+        self.resid_dropout = nn.Dropout(dropout)
+        self.n_head = n_head
+        self.n_embd = cov_emb
+        self.dropout = dropout
+
+        self.ln_att = LayerNorm(cov_emb, bias=bias)
+        self.mlp = MLP(cov_emb, cov_emb,factor=factor,dropout=dropout, bias=bias)
+
+        self.len_enc = enc_len
+        self.len_dec = dec_len
+
+    def forward(self,x,level_past):
+
+
+        queries = self.c_attn_q(x)
+        keys = self.c_attn_k(x)
+        values = self.c_attn_v(x)
+
+        B, T, C = keys.size()
+        keys = keys.view(B, T, self.n_head, C // self.n_head).transpose(1,2)   # going from B,T,nh,Ch to B,nh,T,ch
+
+        B, T, C = values.size()
+        values = values.view(B, T, self.n_head, C // self.n_head).transpose(1,2) 
+
+        B, T, C = queries.size()
+        queries = queries.view(B, T, self.n_head, C // self.n_head).transpose(1,2)
+
+        y = torch.nn.functional.scaled_dot_product_attention(queries, keys, values, attn_mask=None, dropout_p=self.dropout, is_causal=False)
+        y = y.transpose(1,2).contiguous().view(B, T, C) 
+
+        output  = x + self.resid_dropout(self.c_proj(y))
+        output = output + self.mlp(self.ln_att(output))
+
+        parameters = self.p_proj(output)
+
+        alpha = parameters[:,:,0]
+        beta = parameters[:,1:,1]
+        phi = torch.sigmoid(parameters[:,-1,2].unsqueeze(-1).unsqueeze(-1))
+
+        alpha = F.softmax(alpha,dim=1)
+
+        output_level = (alpha.unsqueeze(1) @ level_past.unsqueeze(-1)).repeat(1,self.len_dec,1)
+
+        # Trend calculation
+        target_diff = level_past.diff(dim=1)
+        
+        beta = F.softmax(beta,dim=1)
+        output_trend = (beta.unsqueeze(1) @ target_diff.unsqueeze(-1)).repeat(1, self.len_dec, 1)
+
+        output_trend *= phi ** torch.arange(self.len_dec,device=x.device).unsqueeze(0).unsqueeze(-1)
+
+        # Cumulative sum to generate the trend over time
+        output_trend = output_trend.cumsum(dim=1)
+        
+        # Combine level and trend
+        output_tensor = output_level + output_trend
+        level_proj = self.l_proj(output_tensor)
         return output_tensor, level_proj, (alpha,beta,phi)
     
 class LayerNorm(nn.Module):
@@ -343,17 +412,19 @@ class HNAM(BaseModelWithCovariates):
         self.post_lns = nn.ModuleDict({feature:LayerNorm(cov_emb,bias=bias) for feature in self.hparams.causal})
 
 
-        self.trend_block = Smoothing_GRU(
-                                cov_emb = cov_emb,
-                                dropout = dropout,
-                                enc_len = self.hparams.max_encoder_length,
-                                dec_len = self.hparams.max_prediction_length,
-                                factor=1,
-                                damped=True
-        )
+        # self.trend_block = Smoothing_GRU(
+        #                         cov_emb = cov_emb,
+        #                         dropout = dropout,
+        #                         enc_len = self.hparams.max_encoder_length,
+        #                         dec_len = self.hparams.max_prediction_length,
+        #                         factor=1,
+        #                         damped=True
+        # )
+
+        self.trend_block = TrendAttention(cov_emb=cov_emb,bias=bias,n_head=cov_heads,factor=factor,dropout=dropout,att_proj=self.hparams.att_proj,enc_len = self.hparams.max_encoder_length,dec_len = self.hparams.max_prediction_length)
 
         if self.hparams.attention:
-            self.multi_attention = MultiAttention(causal = self.hparams.causal,cov_emb=cov_emb,bias=bias,n_head=cov_heads,factor=1,dropout=dropout,att_proj=self.hparams.att_proj)
+            self.multi_attention = MultiAttention(causal = self.hparams.causal,cov_emb=cov_emb,bias=bias,n_head=cov_heads,factor=factor,dropout=dropout,att_proj=self.hparams.att_proj)
 
         self.causal_mlps_post = nn.ModuleDict({feature:MLP(cov_emb,cov_emb,factor=factor,dropout=dropout,bias=bias) for feature in self.hparams.causal})
         self.causal_projections = nn.ModuleDict({feature:Projection(cov_emb,(self.hparams['embedding_sizes'].get(feature,(2,None))[0]-int(feature not in self.hparams.one_hot_not_minus_one))*output_size,bias=True) for feature in self.hparams.causal})
@@ -416,6 +487,7 @@ class HNAM(BaseModelWithCovariates):
             cov_effects = max_decoder_length
 
         level_past = self.dtf(x_normal,self.hparams.target,stack=True).sum(axis=2)[:,:max_encoder_length,0] 
+
         level_pred,level_proj,smoothing_params = self.trend_block(past_key_values,level_past)
 
 
