@@ -53,14 +53,14 @@
    {% endblock %}
 
 {% block modules %}
-{% if all_modules %}
+{% if modules %}
 .. rubric:: Modules
 
 .. autosummary::
    :toctree:
    :template: custom-module-template.rst
    :recursive:
-{% for item in all_modules %}
+{% for item in modules %}
    {{ item }}
 {%- endfor %}
 {% endif %}

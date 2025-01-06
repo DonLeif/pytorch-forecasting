@@ -1,4 +1,4 @@
-name: hnam2
+name: hnam1
 channels:
   - conda-forge
   - defaults
@@ -8,6 +8,7 @@ dependencies:
   - pip
   - pip:
     - matplotlib==3.9.2
+    - git+https://github.com/DonLeif/pytorch-forecasting.git@hnam-mods
     - torch==2.4.0
     - statsforecast==1.7.6
     - scikit-learn==1.5.1

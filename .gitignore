@@ -76,8 +76,6 @@ docs/source/CHANGELOG.md
 # PyBuilder
 target/
 
-# Jupyter Notebook
-.ipynb_checkpoints
 
 # IPython
 profile_default/
@@ -142,8 +140,8 @@ lightning_logs
 
 # checkpoints
 *.ckpt
-*.pkl
 .DS_Store
 
 # data
 pytorch_forecasting/data/*.parquet
+hnam_experiments/Datasets/
