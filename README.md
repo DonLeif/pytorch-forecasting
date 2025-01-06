@@ -1,5 +1,5 @@
-# Hierarchical Neural Additive Models (HNAM)
-HNAM enables interpretable forecasting of multivariate time series data focusing
+# Hierarchical Neural Additive Models (HNAMs)
+HNAMs enable interpretable forecasting of multivariate time series data focusing
 on demand predictions where future covariates are known.
 
 
@@ -19,11 +19,7 @@ Now, install pytorch-forecasting with HNAM:
 
 `pip install git+https://github.com/DonLeif/hnam.git`
 
-To explore HNAMs experiments and introduction, clone this repo with:
-
-`git clone https://github.com/DonLeif/hnam.git`
-
-and check out the introductory notebook at hnam_introduction.<br />
+<br />
 
 
 

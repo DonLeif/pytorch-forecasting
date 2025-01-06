@@ -407,9 +407,7 @@ class HNAM(BaseModelWithCovariates):
             real_effects[c] = causal_decoder[c].squeeze(-1).transpose(1,2) * real_normal
             cov_effects += real_effects[c]
 
-        # TREND BLOCK
-        # somehow the additions dont add up for cleaning the past
-        # something about transforming the output?
+        # LEVEL CALCULATIONS
 
         level_past = self.dtf(x_normal,self.hparams.target,stack=True).sum(axis=2)[:,:max_encoder_length,0]  # dim2
 
@@ -419,6 +417,8 @@ class HNAM(BaseModelWithCovariates):
 
         level_pred, smoothing_params = self.trend_block(past_key_values,level_past)
         level_past = level_past.unsqueeze(-1)
+
+        # OUTPUT
 
         output = level_pred + cov_effects[:,limit_slice,:]
 
@@ -478,7 +478,6 @@ class HNAM(BaseModelWithCovariates):
         kwargs['output_size'] = len(kwargs['loss'].quantiles)
 
         
-        # add maximum encoder length
         # update defaults
         new_kwargs = copy(kwargs)
         new_kwargs['target'] = [dataset.target] if isinstance(dataset.target, str) else dataset.target
