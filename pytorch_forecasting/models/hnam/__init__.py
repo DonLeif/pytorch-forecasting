@@ -508,6 +508,3 @@ class HNAM(BaseModelWithCovariates):
             return torch.cat([dict[key] for key in keys],dim=-1)
         else:
             return torch.stack([dict[key] for key in keys],dim=-2)
-
-
-
